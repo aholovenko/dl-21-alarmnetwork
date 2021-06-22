@@ -1,7 +1,10 @@
+import datetime
+import logging
+import os
 import pathlib
 import torch
 from torch import nn
-
+from logging.handlers import QueueHandler
 
 SEQ_LEN = 10
 NUM_INPUTS = 2
@@ -11,6 +14,32 @@ BATCH_SIZE = 20
 
 torch.manual_seed(42)
 torch.autograd.set_detect_anomaly(True)
+logging.root.setLevel(logging.INFO)
+
+logger = logging.getLogger(__name__)
+
+
+def init_logger():
+    now_time = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
+    relative_path = f"training_{now_time}.log"
+    log_full_path = os.path.join(os.getcwd(), relative_path)
+
+    logger.info(f'Creating log in {log_full_path}')
+
+    console_handler = logging.StreamHandler()
+    file_handler = logging.handlers.RotatingFileHandler(log_full_path)
+
+    console_handler.setLevel(logging.INFO)
+    logging.root.setLevel(logging.INFO)
+    file_handler.setLevel(logging.INFO)
+
+    default_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
+    console_handler.setFormatter(default_formatter)
+    file_handler.setFormatter(default_formatter)
+
+    logging.root.addHandler(file_handler)
+    logging.root.addHandler(console_handler)
 
 
 def read_data_adding_problem(csv_filename):
@@ -163,19 +192,19 @@ def adding_problem_evaluate(outputs, gt_outputs):
 
 def evaluate_model(model, X_test, T_test):
     test_acc = adding_problem_evaluate(model(X_test), T_test)
-    print(f'\nTEST accuracy for model {type(model).__name__} is {test_acc}')
+    logger.info(f'\nTEST accuracy for model {type(model).__name__} is {test_acc}')
     return test_acc
 
 
 def train_model(model, X_train, X_dev, T_train, T_dev, T):
-    print(f'Training model: {type(model).__name__}')
+    logger.info(f'Training model: {type(model).__name__}')
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
     for e in range(50):
         model.eval()
         dev_acc = adding_problem_evaluate(model(X_dev), T_dev)
-        print(f'T = {T}, epoch = {e}, DEV accuracy = {dev_acc}%%')
+        logger.info(f'T = {T}, epoch = {e}, DEV accuracy = {dev_acc}%%')
         if dev_acc > 99.5:
             break
         model.train()
@@ -191,9 +220,12 @@ def train_model(model, X_train, X_dev, T_train, T_dev, T):
 
 def main():
     print('Welcome to the Matrix!')
+    init_logger()
 
     results = dict()
     for T in [10, 50, 70, 100]:
+
+        logger.info(f'Staring run for sequence length T = {T}...')
 
         X_train, T_train = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_train.csv' % T)
         X_dev, T_dev = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_dev.csv' % T)
@@ -212,9 +244,14 @@ def main():
         alarmwork_test_acc = evaluate_model(alarmwork_model, X_test, T_test)
 
         results[T] = {
-            'SimpleRNNFromBox': rnn_test_acc, 'SimpleLSTMFromBox': lstm_model_acc, 'VectorAlarmworkRNN': alarmwork_test_acc
+            'SimpleRNNFromBox': rnn_test_acc,
+            'SimpleLSTMFromBox': lstm_model_acc,
+            'VectorAlarmworkRNN': alarmwork_test_acc
         }
-    print(results)
+
+        logger.info(f'Finished run for sequence length T = {T}: {results[T]}.')
+
+    logger.info(results)
 
 
 if __name__ == '__main__':
