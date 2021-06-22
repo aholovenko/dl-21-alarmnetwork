@@ -10,6 +10,7 @@ NUM_OUTPUTS = 1
 BATCH_SIZE = 20
 
 torch.manual_seed(42)
+torch.autograd.set_detect_anomaly(True)
 
 
 def read_data_adding_problem(csv_filename):
@@ -88,57 +89,63 @@ class SimpleLSTMFromBox(nn.Module):
         num_data, max_seq_len, _ = X.shape
         h0 = torch.zeros(1, num_data, self.num_hidden)
         c0 = torch.zeros(1, num_data, self.num_hidden)
-        output, (hn, cn) = self.lstm(X, (h0, c0)) # output.shape: num_data x seq_len x num_hidden
-        last_output = output[:, -1, :] # num_data x num_hidden
-        Y = self.out_layer(last_output) # num_data x num_outputs
+        output, (hn, cn) = self.lstm(X, (h0, c0))  # output.shape: num_data x seq_len x num_hidden
+        last_output = output[:, -1, :]  # num_data x num_hidden
+        Y = self.out_layer(last_output)  # num_data x num_outputs
         return Y
 
 
-class AlarmworkRNN(nn.Module):
+class VectorAlarmworkRNN(nn.Module):
+    # vector form
+
     def __init__(self, num_inputs, num_hidden, num_outputs):
-        super(AlarmworkRNN, self).__init__()
+        super(VectorAlarmworkRNN, self).__init__()
         self.num_inputs = num_inputs
         self.num_hidden = num_hidden
         self.num_outputs = num_outputs
-        self.W_in1 = nn.Parameter(torch.empty((num_hidden, num_inputs)), requires_grad=True)
-        self.b_in1 = nn.Parameter(torch.empty(num_hidden), requires_grad=True)
-        self.W_rec1 = nn.Parameter(torch.empty((num_hidden, num_hidden)), requires_grad=True)
-        self.W_in2 = nn.Parameter(torch.empty((num_hidden, num_inputs)), requires_grad=True)
-        self.b_in2 = nn.Parameter(torch.empty(num_hidden), requires_grad=True)
-        self.W_rec2 = nn.Parameter(torch.empty((num_hidden, num_hidden)), requires_grad=True)
-        self.W_out = nn.Parameter(torch.empty((num_outputs, num_hidden)), requires_grad=True)
-        self.b_out = nn.Parameter(torch.empty(num_outputs), requires_grad=True)
+        self.W_in1, self.b_in1, self.W_rec1, self.W_in2, self.b_in2, self.W_rec2, self.W_out, self.b_out = \
+            self._init_params()
 
     def forward(self, X):
         num_data, max_seq_len, _ = X.shape
-        W_in1, b_in1, W_rec1, W_in2, b_in2, W_rec2, W_out, b_out = self._init_params()
         z_0 = torch.zeros(self.num_hidden)
-        Y = torch.zeros((num_data, self.num_outputs), requires_grad=True)
+        z_in1 = torch.zeros((num_data, max_seq_len, self.num_hidden))
+        a_in1 = torch.zeros((num_data, max_seq_len, self.num_hidden))
+        z_in2 = torch.zeros((num_data, max_seq_len, self.num_hidden))
+        a_in2 = torch.zeros((num_data, max_seq_len, self.num_hidden))
+        z_in12 = torch.zeros((num_data, max_seq_len, self.num_hidden))
+        a_out = torch.zeros((num_data, self.num_outputs))
+        Y = torch.zeros((num_data, self.num_outputs))
         for n in range(num_data):
-            xn = X[n, :, :]
-            z_in1 = torch.zeros((max_seq_len, self.num_hidden))
-            z_in2 = torch.zeros((max_seq_len, self.num_hidden))
-            z_in12 = torch.zeros((max_seq_len, self.num_hidden))
             for l in range(max_seq_len):
-                z_in12[l] = z_in1[l - 1] if l > 1 else z_0 + z_in2[l - 1] if l > 1 else z_0
-                a_in1 = torch.matmul(W_in1, xn[l, :]) + torch.matmul(W_rec1, z_in12[l]) + b_in1
-                z_in1[l] = torch.tanh(a_in1)
-                a_in2 = torch.matmul(W_in2, xn[l, :]) + torch.matmul(W_rec2, z_in2[l - 1 if l % 2 == 0 else 2] if l > 1 else z_0)  + b_in2
-                z_in2[l] = torch.tanh(a_in2)
-            a_out = torch.matmul(W_out, z_in1[-1, :]) + b_out
-            Y[n, :] = torch.tanh(a_out)
+                z_in12[n, l] = z_in1[n, l - 1].clone() if l > 1 else z_0 + z_in2[n, l - 1].clone() if l > 1 else z_0
+                a_in1[n, l] = torch.matmul(self.W_in1, X[n, l, :]) + torch.matmul(
+                    self.W_rec1, z_in12[n, l].clone()) + self.b_in1
+                z_in1[n, l] = torch.tanh(a_in1[n, l].clone())
+                a_in2[n, l] = torch.matmul(self.W_in2, X[n, l, :]) + torch.matmul(
+                    self.W_rec2, z_in2[n, l - 1 if l % 2 == 0 else 2].clone() if l > 1 else z_0) + self.b_in2
+                z_in2[n, l] = torch.tanh(a_in2[n, l].clone())
+            a_out[n] = torch.matmul(self.W_out, z_in1[n, -1, :].clone()) + self.b_out
+            Y[n] = torch.tanh(a_out[n].clone())
         return Y
 
     def _init_params(self):
-        W_in1 = torch.zeros(self.W_in1.shape)
-        b_in1 = torch.zeros(self.b_in1.shape)
-        W_rec1 = torch.zeros(self.W_rec1.shape)
-        W_in2 = torch.zeros(self.W_in2.shape)
-        b_in2 = torch.zeros(self.b_in2.shape)
-        W_rec2 = torch.zeros(self.W_rec2.shape)
-        W_out = torch.zeros(self.W_out.shape)
-        b_out = torch.zeros(self.b_out.shape)
+        W_in1 = nn.Parameter(torch.zeros((self.num_hidden, self.num_inputs)))
+        b_in1 = nn.Parameter(torch.zeros(self.num_hidden))
+        W_rec1 = nn.Parameter(torch.zeros((self.num_hidden, self.num_hidden)))
+        W_in2 = nn.Parameter(torch.zeros((self.num_hidden, self.num_inputs)))
+        b_in2 = nn.Parameter(torch.zeros(self.num_hidden))
+        W_rec2 = nn.Parameter(torch.zeros((self.num_hidden, self.num_hidden)))
+        W_out = nn.Parameter(torch.zeros((self.num_outputs, self.num_hidden)))
+        b_out = nn.Parameter(torch.zeros(self.num_outputs))
         return W_in1, b_in1, W_rec1, W_in2, b_in2, W_rec2, W_out, b_out
+
+
+class ScalarAlarmworkRNN(VectorAlarmworkRNN):
+    # scalar form
+
+    def forward(self, X):
+        pass
 
 
 def adding_problem_evaluate(outputs, gt_outputs):
@@ -186,7 +193,7 @@ def main():
     print('Welcome to the Matrix!')
 
     results = dict()
-    for T in [10, 50]:
+    for T in [10, 50, 70, 100]:
 
         X_train, T_train = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_train.csv' % T)
         X_dev, T_dev = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_dev.csv' % T)
@@ -200,13 +207,12 @@ def main():
         lstm_model = train_model(lstm_model, X_train, X_dev, T_train, T_dev, T)
         lstm_model_acc = evaluate_model(lstm_model, X_test, T_test)
 
-        # alarmwork_model = AlarmworkRNN(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        # alarmwork_model = train_model(alarmwork_model, X_train, X_dev, T_train, T_dev, T)
-        # alarmwork_test_acc = evaluate_model(alarmwork_model, X_test, T_test)
+        alarmwork_model = VectorAlarmworkRNN(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
+        alarmwork_model = train_model(alarmwork_model, X_train, X_dev, T_train, T_dev, T)
+        alarmwork_test_acc = evaluate_model(alarmwork_model, X_test, T_test)
 
         results[T] = {
-            'SimpleRNNFromBox': rnn_test_acc, 'SimpleLSTMFromBox': lstm_model_acc
-            # 'SimpleRNNFromBox': rnn_test_acc, 'SimpleLSTMFromBox': lstm_model_acc, 'AlarmworkRNN': alarmwork_test_acc
+            'SimpleRNNFromBox': rnn_test_acc, 'SimpleLSTMFromBox': lstm_model_acc, 'VectorAlarmworkRNN': alarmwork_test_acc
         }
     print(results)
 
