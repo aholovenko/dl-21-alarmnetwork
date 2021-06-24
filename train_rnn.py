@@ -11,6 +11,9 @@ NUM_INPUTS = 2
 NUM_HIDDEN = 50
 NUM_OUTPUTS = 1
 BATCH_SIZE = 20
+EPOCHS = 50
+
+MODEL_WEIGHTS_DIR = 'weights'
 
 torch.manual_seed(42)
 torch.autograd.set_detect_anomaly(True)
@@ -21,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 def init_logger():
     now_time = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M')
-    relative_path = f"training_{now_time}.log"
+    relative_path = f"logs/training_{now_time}.log"
     log_full_path = os.path.join(os.getcwd(), relative_path)
 
     logger.info(f'Creating log in {log_full_path}')
@@ -154,8 +157,8 @@ class VectorAlarmworkRNN(nn.Module):
                 a_in2[n, l] = torch.matmul(self.W_in2, X[n, l, :]) + torch.matmul(
                     self.W_rec2, z_in2[n, l - 1 if l % 2 == 0 else 2].clone() if l > 1 else z_0) + self.b_in2
                 z_in2[n, l] = torch.tanh(a_in2[n, l].clone())
-            a_out[n] = torch.matmul(self.W_out, z_in1[n, -1, :].clone()) + self.b_out
-            Y[n] = torch.tanh(a_out[n].clone())
+            a_out[n, :] = torch.matmul(self.W_out, z_in1[n, -1, :].clone()) + self.b_out
+            Y[n, :] = torch.tanh(a_out[n, :].clone())
         return Y
 
     def _init_params(self):
@@ -192,16 +195,24 @@ def adding_problem_evaluate(outputs, gt_outputs):
 
 def evaluate_model(model, X_test, T_test):
     test_acc = adding_problem_evaluate(model(X_test), T_test)
-    logger.info(f'\nTEST accuracy for model {type(model).__name__} is {test_acc}')
+    logger.info(f'TEST accuracy for model {type(model).__name__} is {test_acc}')
     return test_acc
 
 
 def train_model(model, X_train, X_dev, T_train, T_dev, T):
-    logger.info(f'Training model: {type(model).__name__}')
+    model_name = _get_model_name(model)
+
+    loaded_model = load_model_weights(model, T, MODEL_WEIGHTS_DIR, EPOCHS)
+
+    if loaded_model:
+        logger.info(f'Model exists, loaded weight for {model_name}')
+        return loaded_model
+
+    logger.info(f'Training model: {model_name}')
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
-    for e in range(50):
+    for e in range(EPOCHS):
         model.eval()
         dev_acc = adding_problem_evaluate(model(X_dev), T_dev)
         logger.info(f'T = {T}, epoch = {e}, DEV accuracy = {dev_acc}%%')
@@ -215,7 +226,39 @@ def train_model(model, X_train, X_dev, T_train, T_dev, T):
             loss.backward()
             optimizer.step()
 
+    save_model_weights(model, T, MODEL_WEIGHTS_DIR, EPOCHS)
+
     return model
+
+
+def _get_model_name(model):
+    return type(model).__name__
+
+
+def _get_model_path(output_dir, model_name, T, epochs):
+    return f'{output_dir}/{model_name}_E={epochs}_T={T}.pt'
+
+
+def save_model_weights(model, T, weights_dir, epochs):
+    os.makedirs(weights_dir, exist_ok=True)
+    model_path = _get_model_path(weights_dir, type(model).__name__, T, epochs)
+    torch.save(model.state_dict(), model_path)
+    logger.info(f'Saved model weights to {model_path}')
+
+
+def load_model_weights(model_class, T, weights_dir, epochs):
+    model_name = _get_model_name(model_class)
+
+    model_path = _get_model_path(weights_dir, model_name, T, epochs)
+
+    if not os.path.exists(model_path):
+        return
+
+    model_class.load_state_dict(torch.load(model_path))
+    model_class.eval()
+
+    logger.info(f'Loading model weights for {model_name} from {model_path}')
+    return model_class
 
 
 def main():

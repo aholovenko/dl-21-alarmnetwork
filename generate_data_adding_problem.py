@@ -2,7 +2,7 @@ import random
 import pathlib
 
 
-SEQ_LEN = 10  # 10, 50. 70, 100
+SEQ_LEN = 10  # 10, 50, 70, 100
 ROUND_DEC = 2
 
 
