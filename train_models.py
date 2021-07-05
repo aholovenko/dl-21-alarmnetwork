@@ -2,10 +2,12 @@ import datetime
 import json
 import functools
 import logging
+import math
 import os
 import pathlib
 import time
 import torch
+from collections import defaultdict
 from torch import nn
 from logging.handlers import QueueHandler
 
@@ -154,20 +156,19 @@ class AlarmworkNet(nn.Module):
             self._init_weights()
 
     def _init_weights(self):
-        W_in1 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_inputs)))
+        W_in1 = nn.Parameter(self._xavier_init(self.num_hidden, self.num_inputs))
         b_in1 = nn.Parameter(torch.zeros(self.num_hidden, 1))
-        W_rec1 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_hidden)))
-        W_in2 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_inputs)))
+        W_rec1 = nn.Parameter(self._xavier_init(self.num_hidden, self.num_hidden))
+        W_in2 = nn.Parameter(self._xavier_init(self.num_hidden, self.num_inputs))
         b_in2 = nn.Parameter(torch.zeros(self.num_hidden, 1))
-        W_rec2 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_hidden)))
-        W_out = nn.Parameter(self._xavier_init(torch.zeros(self.num_outputs, self.num_hidden)))
+        W_rec2 = nn.Parameter(self._xavier_init(self.num_hidden, self.num_hidden))
+        W_out = nn.Parameter(self._xavier_init(self.num_outputs, self.num_hidden))
         b_out = nn.Parameter(torch.zeros(self.num_outputs, 1))
         return W_in1, b_in1, W_rec1, W_in2, b_in2, W_rec2, W_out, b_out
 
     @staticmethod
-    def _xavier_init(args):
-        # TODO create own implementation
-        return torch.nn.init.xavier_uniform_(args)
+    def _xavier_init(a, b):
+        return torch.Tensor(a, b).uniform_(-1, 1) * math.sqrt(6./(a + b))
 
     def forward(self, X):
         num_data = X.shape[0]
@@ -214,7 +215,7 @@ def evaluate_model(model, X_test, T_test):
 
 
 @timer
-def train_model(model, X_train, X_dev, T_train, T_dev, T, force=True):
+def train_model(model, X_train, X_dev, T_train, T_dev, T, force=False):
     model_name = get_model_name(model)
 
     if not force:
@@ -281,9 +282,30 @@ def load_model_weights(model_class, T, weights_dir, epochs):
     return model_class
 
 
-def write_results(results):
-    with open('results.json', 'w') as output_file:
+def write_or_load(results, file_name='results', force=False, model_name=None):
+    file_name = f'{file_name}.json'
+    if os.path.exists(file_name) and not force and not results.get('dev'):
+        logger.info(f'{file_name} exists... loading')
+
+        with open(file_name) as input_file:
+            loaded_results = json.load(input_file)
+            if model_name:
+                return loaded_results.get(model_name)
+            else:
+                return loaded_results
+
+    with open(file_name, 'w') as output_file:
+        logger.info(f'Savind results to {file_name}...')
         output_file.write(json.dumps(results))
+        return results
+
+
+def run(model_class, X_train, X_dev, T_train, T_dev, X_test, T_test, T):
+    model = model_class(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
+    model, dev_acc = train_model(model, X_train, X_dev, T_train, T_dev, T)
+    test_acc = evaluate_model(model, X_test, T_test)
+    run_results = {'test': test_acc, 'dev': dev_acc}
+    return get_model_name(model), run_results
 
 
 def main():
@@ -292,8 +314,10 @@ def main():
 
     data_dir = 'adding_problem_data'
 
-    results = dict()
-    for T in [10, 50, 70, 100]:
+    Ts = [10, 50, 70, 100]
+    results = defaultdict(dict)
+
+    for T in Ts:
 
         logger.info(f'Staring run for sequence length T = {T}...')
 
@@ -301,28 +325,19 @@ def main():
         X_dev, T_dev = read_data_adding_problem_torch(f'{data_dir}/adding_problem_T=%03d_dev.csv' % T)
         X_test, T_test = read_data_adding_problem_torch(f'{data_dir}/adding_problem_T=%03d_test.csv' % T)
 
-        rnn_model = SimpleRNNFromBox(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        rnn_model, rnn_dev_acc = train_model(rnn_model, X_train, X_dev, T_train, T_dev, T)
-        rnn_test_acc = evaluate_model(rnn_model, X_test, T_test)
+        for model_class in [SimpleRNNFromBox, SimpleLSTMFromBox, AlarmworkNet]:
 
-        lstm_model = SimpleLSTMFromBox(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        lstm_model, lstm_dev_acc = train_model(lstm_model, X_train, X_dev, T_train, T_dev, T)
-        lstm_test_acc = evaluate_model(lstm_model, X_test, T_test)
-
-        alarmwork_model = AlarmworkNet(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        alarmwork_model, alarmwork_dev_acc = train_model(alarmwork_model, X_train, X_dev, T_train, T_dev, T)
-        alarmwork_test_acc = evaluate_model(alarmwork_model, X_test, T_test)
-
-        results[T] = {
-            'SimpleRNNFromBox': {'test': rnn_test_acc, 'dev': rnn_dev_acc},
-            'SimpleLSTMFromBox': {'test': lstm_test_acc, 'dev': lstm_dev_acc},
-            'AlarmworkNet': {'test': alarmwork_test_acc, 'dev': alarmwork_dev_acc},
-        }
+            model_name, model_results = run(model_class, X_train, X_dev, T_train, T_dev, X_test, T_test, T)
+            results[T][model_name] = write_or_load(
+                results=model_results,
+                file_name=f'results_T={T}',
+                model_name=model_name
+            )
 
         logger.info(f'Finished run for sequence length T = {T}: {results[T]}.')
+        write_or_load(results, force=True)
 
     logger.info(results)
-    write_results(results)
 
 
 if __name__ == '__main__':
