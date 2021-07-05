@@ -1,4 +1,5 @@
 import datetime
+import json
 import functools
 import logging
 import os
@@ -213,7 +214,7 @@ def evaluate_model(model, X_test, T_test):
 
 
 @timer
-def train_model(model, X_train, X_dev, T_train, T_dev, T, force=False):
+def train_model(model, X_train, X_dev, T_train, T_dev, T, force=True):
     model_name = get_model_name(model)
 
     if not force:
@@ -221,16 +222,20 @@ def train_model(model, X_train, X_dev, T_train, T_dev, T, force=False):
 
         if loaded_model:
             logger.info(f'Model exists, loaded weight for {model_name}')
-            return loaded_model
+            return loaded_model, {}
 
     logger.info(f'Training model: {model_name}')
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
+    dev_results = {}
+
     for e in range(EPOCHS):
         model.eval()
         dev_acc = adding_problem_evaluate(model(X_dev), T_dev)
         logger.info(f'T = {T}, epoch = {e}, DEV accuracy = {dev_acc}%%')
+
+        dev_results[e] = dev_acc
         if dev_acc > 99.5:
             break
         model.train()
@@ -243,7 +248,7 @@ def train_model(model, X_train, X_dev, T_train, T_dev, T, force=False):
 
     save_model_weights(model, T, MODEL_WEIGHTS_DIR, EPOCHS)
 
-    return model
+    return model, dev_results
 
 
 def get_model_name(model):
@@ -276,40 +281,48 @@ def load_model_weights(model_class, T, weights_dir, epochs):
     return model_class
 
 
+def write_results(results):
+    with open('results.json', 'w') as output_file:
+        output_file.write(json.dumps(results))
+
+
 def main():
     print('Welcome to the Matrix!')
     init_logger()
+
+    data_dir = 'adding_problem_data'
 
     results = dict()
     for T in [10, 50, 70, 100]:
 
         logger.info(f'Staring run for sequence length T = {T}...')
 
-        X_train, T_train = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_train.csv' % T)
-        X_dev, T_dev = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_dev.csv' % T)
-        X_test, T_test = read_data_adding_problem_torch('adding_problem_data/adding_problem_T=%03d_test.csv' % T)
+        X_train, T_train = read_data_adding_problem_torch(f'{data_dir}/adding_problem_T=%03d_train.csv' % T)
+        X_dev, T_dev = read_data_adding_problem_torch(f'{data_dir}/adding_problem_T=%03d_dev.csv' % T)
+        X_test, T_test = read_data_adding_problem_torch(f'{data_dir}/adding_problem_T=%03d_test.csv' % T)
 
         rnn_model = SimpleRNNFromBox(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        rnn_model = train_model(rnn_model, X_train, X_dev, T_train, T_dev, T)
+        rnn_model, rnn_dev_acc = train_model(rnn_model, X_train, X_dev, T_train, T_dev, T)
         rnn_test_acc = evaluate_model(rnn_model, X_test, T_test)
 
         lstm_model = SimpleLSTMFromBox(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        lstm_model = train_model(lstm_model, X_train, X_dev, T_train, T_dev, T)
-        lstm_model_acc = evaluate_model(lstm_model, X_test, T_test)
+        lstm_model, lstm_dev_acc = train_model(lstm_model, X_train, X_dev, T_train, T_dev, T)
+        lstm_test_acc = evaluate_model(lstm_model, X_test, T_test)
 
         alarmwork_model = AlarmworkNet(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
-        alarmwork_model = train_model(alarmwork_model, X_train, X_dev, T_train, T_dev, T)
+        alarmwork_model, alarmwork_dev_acc = train_model(alarmwork_model, X_train, X_dev, T_train, T_dev, T)
         alarmwork_test_acc = evaluate_model(alarmwork_model, X_test, T_test)
 
         results[T] = {
-            'SimpleRNNFromBox': rnn_test_acc,
-            'SimpleLSTMFromBox': lstm_model_acc,
-            'AlarmworkNet': alarmwork_test_acc,
+            'SimpleRNNFromBox': {'test': rnn_test_acc, 'dev': rnn_dev_acc},
+            'SimpleLSTMFromBox': {'test': lstm_test_acc, 'dev': lstm_dev_acc},
+            'AlarmworkNet': {'test': alarmwork_test_acc, 'dev': alarmwork_dev_acc},
         }
 
         logger.info(f'Finished run for sequence length T = {T}: {results[T]}.')
 
     logger.info(results)
+    write_results(results)
 
 
 if __name__ == '__main__':
