@@ -1,7 +1,9 @@
 import datetime
+import functools
 import logging
 import os
 import pathlib
+import time
 import torch
 from torch import nn
 from logging.handlers import QueueHandler
@@ -43,6 +45,19 @@ def init_logger():
 
     logging.root.addHandler(file_handler)
     logging.root.addHandler(console_handler)
+
+
+def timer(func):
+    # taken from https://realpython.com/python-timer/
+    @functools.wraps(func)
+    def wrapper_timer(*args, **kwargs):
+        tic = time.perf_counter()
+        value = func(*args, **kwargs)
+        toc = time.perf_counter()
+        elapsed_time = toc - tic
+        logger.info(f"Elapsed time: {elapsed_time:0.4f} seconds")
+        return value
+    return wrapper_timer
 
 
 def read_data_adding_problem(csv_filename):
@@ -127,57 +142,55 @@ class SimpleLSTMFromBox(nn.Module):
         return Y
 
 
-class VectorAlarmworkRNN(nn.Module):
-    # vector form
-
-    def __init__(self, num_inputs, num_hidden, num_outputs):
-        super(VectorAlarmworkRNN, self).__init__()
+class AlarmworkNet(nn.Module):
+    def __init__(self, num_inputs, num_hidden, num_outputs, vector_form=True):
+        super(AlarmworkNet, self).__init__()
+        self.vector_form = vector_form
         self.num_inputs = num_inputs
         self.num_hidden = num_hidden
         self.num_outputs = num_outputs
         self.W_in1, self.b_in1, self.W_rec1, self.W_in2, self.b_in2, self.W_rec2, self.W_out, self.b_out = \
-            self._init_params()
+            self._init_weights()
 
-    def forward(self, X):
-        num_data, max_seq_len, _ = X.shape
-        z_0 = torch.zeros(self.num_hidden)
-        z_in1 = torch.zeros((num_data, max_seq_len, self.num_hidden))
-        a_in1 = torch.zeros((num_data, max_seq_len, self.num_hidden))
-        z_in2 = torch.zeros((num_data, max_seq_len, self.num_hidden))
-        a_in2 = torch.zeros((num_data, max_seq_len, self.num_hidden))
-        z_in12 = torch.zeros((num_data, max_seq_len, self.num_hidden))
-        a_out = torch.zeros((num_data, self.num_outputs))
-        Y = torch.zeros((num_data, self.num_outputs))
-        for n in range(num_data):
-            for l in range(max_seq_len):
-                z_in12[n, l] = z_in1[n, l - 1].clone() if l > 1 else z_0 + z_in2[n, l - 1].clone() if l > 1 else z_0
-                a_in1[n, l] = torch.matmul(self.W_in1, X[n, l, :]) + torch.matmul(
-                    self.W_rec1, z_in12[n, l].clone()) + self.b_in1
-                z_in1[n, l] = torch.tanh(a_in1[n, l].clone())
-                a_in2[n, l] = torch.matmul(self.W_in2, X[n, l, :]) + torch.matmul(
-                    self.W_rec2, z_in2[n, l - 1 if l % 2 == 0 else 2].clone() if l > 1 else z_0) + self.b_in2
-                z_in2[n, l] = torch.tanh(a_in2[n, l].clone())
-            a_out[n, :] = torch.matmul(self.W_out, z_in1[n, -1, :].clone()) + self.b_out
-            Y[n, :] = torch.tanh(a_out[n, :].clone())
-        return Y
-
-    def _init_params(self):
-        W_in1 = nn.Parameter(torch.zeros((self.num_hidden, self.num_inputs)))
-        b_in1 = nn.Parameter(torch.zeros(self.num_hidden))
-        W_rec1 = nn.Parameter(torch.zeros((self.num_hidden, self.num_hidden)))
-        W_in2 = nn.Parameter(torch.zeros((self.num_hidden, self.num_inputs)))
-        b_in2 = nn.Parameter(torch.zeros(self.num_hidden))
-        W_rec2 = nn.Parameter(torch.zeros((self.num_hidden, self.num_hidden)))
-        W_out = nn.Parameter(torch.zeros((self.num_outputs, self.num_hidden)))
-        b_out = nn.Parameter(torch.zeros(self.num_outputs))
+    def _init_weights(self):
+        W_in1 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_inputs)))
+        b_in1 = nn.Parameter(torch.zeros(self.num_hidden, 1))
+        W_rec1 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_hidden)))
+        W_in2 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_inputs)))
+        b_in2 = nn.Parameter(torch.zeros(self.num_hidden, 1))
+        W_rec2 = nn.Parameter(self._xavier_init(torch.zeros(self.num_hidden, self.num_hidden)))
+        W_out = nn.Parameter(self._xavier_init(torch.zeros(self.num_outputs, self.num_hidden)))
+        b_out = nn.Parameter(torch.zeros(self.num_outputs, 1))
         return W_in1, b_in1, W_rec1, W_in2, b_in2, W_rec2, W_out, b_out
 
-
-class ScalarAlarmworkRNN(VectorAlarmworkRNN):
-    # scalar form
+    @staticmethod
+    def _xavier_init(args):
+        # TODO create own implementation
+        return torch.nn.init.xavier_uniform_(args)
 
     def forward(self, X):
-        pass
+        num_data = X.shape[0]
+        z_in1 = self.recurrent_layers_pass(X)
+        Y = torch.zeros((num_data, self.num_outputs))
+        if self.vector_form:
+            Y = torch.tanh(self.W_out @ z_in1 + self.b_out).t()
+        else:
+            for n in range(num_data):
+                Y[n, :] = torch.tanh(self.W_out @ z_in1[:, n] + self.b_out)
+        return Y
+
+    def recurrent_layers_pass(self, X):
+        num_data = X.shape[0]
+        max_seq_len = X.shape[1]
+        z_in1 = torch.zeros((self.num_hidden, num_data))
+        z_in2 = torch.zeros((self.num_hidden, num_data))
+        for l in range(max_seq_len):
+            xl = X[:, l, :].t()
+            z_in12 = z_in1 + z_in2
+            z_in1 = torch.tanh(self.W_in1@xl + self.W_rec1@z_in12 + self.b_in1)
+            if l % 2 == 0:
+                z_in2 = torch.tanh(self.W_in2@xl + self.W_rec2@z_in2 + self.b_in2)
+        return z_in1
 
 
 def adding_problem_evaluate(outputs, gt_outputs):
@@ -199,14 +212,16 @@ def evaluate_model(model, X_test, T_test):
     return test_acc
 
 
-def train_model(model, X_train, X_dev, T_train, T_dev, T):
-    model_name = _get_model_name(model)
+@timer
+def train_model(model, X_train, X_dev, T_train, T_dev, T, force=False):
+    model_name = get_model_name(model)
 
-    loaded_model = load_model_weights(model, T, MODEL_WEIGHTS_DIR, EPOCHS)
+    if not force:
+        loaded_model = load_model_weights(model, T, MODEL_WEIGHTS_DIR, EPOCHS)
 
-    if loaded_model:
-        logger.info(f'Model exists, loaded weight for {model_name}')
-        return loaded_model
+        if loaded_model:
+            logger.info(f'Model exists, loaded weight for {model_name}')
+            return loaded_model
 
     logger.info(f'Training model: {model_name}')
     loss_fn = nn.MSELoss()
@@ -231,25 +246,25 @@ def train_model(model, X_train, X_dev, T_train, T_dev, T):
     return model
 
 
-def _get_model_name(model):
+def get_model_name(model):
     return type(model).__name__
 
 
-def _get_model_path(output_dir, model_name, T, epochs):
+def get_model_path(output_dir, model_name, T, epochs):
     return f'{output_dir}/{model_name}_E={epochs}_T={T}.pt'
 
 
 def save_model_weights(model, T, weights_dir, epochs):
     os.makedirs(weights_dir, exist_ok=True)
-    model_path = _get_model_path(weights_dir, type(model).__name__, T, epochs)
+    model_path = get_model_path(weights_dir, type(model).__name__, T, epochs)
     torch.save(model.state_dict(), model_path)
     logger.info(f'Saved model weights to {model_path}')
 
 
 def load_model_weights(model_class, T, weights_dir, epochs):
-    model_name = _get_model_name(model_class)
+    model_name = get_model_name(model_class)
 
-    model_path = _get_model_path(weights_dir, model_name, T, epochs)
+    model_path = get_model_path(weights_dir, model_name, T, epochs)
 
     if not os.path.exists(model_path):
         return
@@ -257,7 +272,7 @@ def load_model_weights(model_class, T, weights_dir, epochs):
     model_class.load_state_dict(torch.load(model_path))
     model_class.eval()
 
-    logger.info(f'Loading model weights for {model_name} from {model_path}')
+    logger.info(f'...trying to load model weights for {model_name} from {model_path}')
     return model_class
 
 
@@ -282,14 +297,14 @@ def main():
         lstm_model = train_model(lstm_model, X_train, X_dev, T_train, T_dev, T)
         lstm_model_acc = evaluate_model(lstm_model, X_test, T_test)
 
-        alarmwork_model = VectorAlarmworkRNN(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
+        alarmwork_model = AlarmworkNet(NUM_INPUTS, NUM_HIDDEN, NUM_OUTPUTS)
         alarmwork_model = train_model(alarmwork_model, X_train, X_dev, T_train, T_dev, T)
         alarmwork_test_acc = evaluate_model(alarmwork_model, X_test, T_test)
 
         results[T] = {
             'SimpleRNNFromBox': rnn_test_acc,
             'SimpleLSTMFromBox': lstm_model_acc,
-            'VectorAlarmworkRNN': alarmwork_test_acc
+            'AlarmworkNet': alarmwork_test_acc,
         }
 
         logger.info(f'Finished run for sequence length T = {T}: {results[T]}.')
