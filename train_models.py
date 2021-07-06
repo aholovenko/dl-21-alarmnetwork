@@ -218,7 +218,7 @@ def evaluate_model(model, X_test, T_test):
 def train_model(model, X_train, X_dev, T_train, T_dev, T, force=False):
     model_name = get_model_name(model)
 
-    if not force:
+    if not force:  # force run
         loaded_model = load_model_weights(model, T, MODEL_WEIGHTS_DIR, EPOCHS)
 
         if loaded_model:
@@ -328,11 +328,7 @@ def main():
         for model_class in [SimpleRNNFromBox, SimpleLSTMFromBox, AlarmworkNet]:
 
             model_name, model_results = run(model_class, X_train, X_dev, T_train, T_dev, X_test, T_test, T)
-            results[T][model_name] = write_or_load(
-                results=model_results,
-                file_name=f'results_T={T}',
-                model_name=model_name
-            )
+            results[T][model_name] = model_results
 
         logger.info(f'Finished run for sequence length T = {T}: {results[T]}.')
         write_or_load(results, force=True)
